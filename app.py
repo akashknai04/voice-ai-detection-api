@@ -5,22 +5,15 @@ import librosa
 import numpy as np
 import tempfile
 import os
-import torch
 import joblib
-from transformers import Wav2Vec2Processor, Wav2Vec2Model
 
 app = FastAPI()
 
-# 🔐 Change this later (for deployment use environment variable)
+# 🔐 Use environment variable in production
 API_SECRET_KEY = "akash_secret_key"
 
-# ✅ Load trained classifier
+# ✅ Load trained classifier (lightweight)
 classifier = joblib.load("voice_classifier.pkl")
-
-# ✅ Load Wav2Vec2 model once at startup (CPU mode)
-processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
-model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
-model.eval()
 
 
 class AudioRequest(BaseModel):
@@ -39,9 +32,8 @@ def detect_audio(
     request: AudioRequest,
     x_api_key: str = Header(...)
 ):
-    # 🔐 API key validation
+    # 🔐 API Key validation
     if x_api_key != API_SECRET_KEY:
-        print("⚠ Unauthorized access attempt detected")
         raise HTTPException(status_code=401, detail="Unauthorized access attempt logged.")
 
     # 🔹 Decode Base64
@@ -50,14 +42,13 @@ def detect_audio(
     except:
         raise HTTPException(status_code=400, detail="Invalid Base64 audio")
 
-    # 🔹 Load audio safely
+    # 🔹 Load audio
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
             temp_audio.write(audio_bytes)
             temp_audio_path = temp_audio.name
 
         y, sr = librosa.load(temp_audio_path, sr=16000, mono=True)
-
         os.remove(temp_audio_path)
 
         duration = len(y) / sr
@@ -71,28 +62,18 @@ def detect_audio(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio processing failed: {str(e)}")
 
-    # 🔹 Extract Wav2Vec2 Embeddings
+    # 🔹 Extract MFCC Features (LIGHTWEIGHT 🔥)
     try:
-        input_values = processor(
-            y,
-            sampling_rate=16000,
-            return_tensors="pt",
-            padding=True
-        ).input_values
-
-        with torch.no_grad():
-            outputs = model(input_values)
-
-        embedding = outputs.last_hidden_state.mean(dim=1)
-        embedding_np = embedding.numpy().reshape(1, -1)
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
+        mfcc_mean = np.mean(mfcc.T, axis=0).reshape(1, -1)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Model processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Feature extraction failed: {str(e)}")
 
-    # 🔹 Classifier Prediction
+    # 🔹 Prediction
     try:
-        prediction = classifier.predict(embedding_np)[0]
-        confidence = classifier.predict_proba(embedding_np)[0][prediction]
+        prediction = classifier.predict(mfcc_mean)[0]
+        confidence = classifier.predict_proba(mfcc_mean)[0][prediction]
 
         label = "ai_generated" if prediction == 1 else "human"
 
