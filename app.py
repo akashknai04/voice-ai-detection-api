@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 import base64
 import librosa
@@ -6,6 +6,7 @@ import numpy as np
 import tempfile
 import os
 import joblib
+import datetime
 
 app = FastAPI()
 
@@ -15,7 +16,10 @@ API_SECRET_KEY = "akash_secret_key"
 # ✅ Load trained classifier (lightweight)
 classifier = joblib.load("voice_classifier.pkl")
 
-# 🔥 Fraud keyword list
+# 🛡️ In-memory request behavior tracker
+request_tracker = {}
+
+# 🔥 Fraud keyword list (future extension ready)
 FRAUD_KEYWORDS = [
     "otp", "bank", "account", "verify", "urgent",
     "transfer", "credit card", "debit card",
@@ -38,15 +42,36 @@ def health():
 @app.post("/v1/detect")
 def detect_audio(
     request: AudioRequest,
+    request_obj: Request,
     x_api_key: str = Header(...)
 ):
-    # 🔐 API Key validation (Honeypot)
+
+    # 🔐 Honeypot API Key validation
     if x_api_key != API_SECRET_KEY:
         print("⚠ Unauthorized access attempt detected")
         raise HTTPException(
             status_code=401,
             detail="Unauthorized access attempt logged."
         )
+
+    # 🛡️ Capture Client IP
+    client_ip = request_obj.client.host
+    current_time = datetime.datetime.utcnow()
+
+    if client_ip not in request_tracker:
+        request_tracker[client_ip] = {
+            "count": 0,
+            "last_request": current_time
+        }
+
+    # Reset if 60 seconds passed
+    time_diff = (current_time - request_tracker[client_ip]["last_request"]).seconds
+
+    if time_diff > 60:
+        request_tracker[client_ip]["count"] = 0
+
+    request_tracker[client_ip]["count"] += 1
+    request_tracker[client_ip]["last_request"] = current_time
 
     # 🔹 Decode Base64
     try:
@@ -61,7 +86,6 @@ def detect_audio(
             temp_audio_path = temp_audio.name
 
         y, sr = librosa.load(temp_audio_path, sr=16000, mono=True)
-
         duration = len(y) / sr
 
         if duration < 0.5:
@@ -75,7 +99,7 @@ def detect_audio(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio processing failed: {str(e)}")
 
-    # 🔹 Extract MFCC Features (Lightweight AI Model)
+    # 🔹 Extract MFCC Features
     try:
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
         mfcc_mean = np.mean(mfcc.T, axis=0).reshape(1, -1)
@@ -88,41 +112,58 @@ def detect_audio(
     try:
         prediction = classifier.predict(mfcc_mean)[0]
         confidence = classifier.predict_proba(mfcc_mean)[0][prediction]
-
         voice_label = "ai_generated" if prediction == 1 else "human"
 
     except Exception as e:
         os.remove(temp_audio_path)
         raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
 
-    # 🔥 Basic Fraud Risk Scoring (Voice + Duration Based)
-    risk_score = 0.0
+    # 🛡️ Intelligent Risk Scoring Engine
+    risk_score = 0
 
+    # AI voice increases risk
     if voice_label == "ai_generated":
-        risk_score += 0.6
+        risk_score += 3
 
-    if duration > 10:
-        risk_score += 0.2
+    # Too many requests from same IP
+    if request_tracker[client_ip]["count"] > 5:
+        risk_score += 2
 
-    risk_score = min(risk_score, 1.0)
+    # Very short audio suspicious
+    if duration < 1:
+        risk_score += 1
 
-    is_fraud = risk_score >= 0.6
+    # Threat level classification
+    if risk_score >= 5:
+        threat_level = "HIGH"
+    elif risk_score >= 3:
+        threat_level = "MEDIUM"
+    else:
+        threat_level = "LOW"
+
+    honeypot_flag = threat_level == "HIGH"
 
     # Clean temp file
     os.remove(temp_audio_path)
 
     return {
-        "is_fraud": is_fraud,
-        "risk_score": round(float(risk_score), 2),
-        "voice_classification": voice_label,
-        "confidence": round(float(confidence), 3),
-        "language": request.language,
-        "meta": {
+        "status": "success",
+        "result": {
+            "is_fraud": honeypot_flag,
+            "risk_score": risk_score,
+            "threat_level": threat_level,
+            "voice_classification": voice_label,
+            "confidence": round(float(confidence), 3),
+            "explanation": "AI voice fraud detection with intelligent behavior scoring."
+        },
+        "audio_metadata": {
+            "language": request.language,
             "sample_rate": sr,
             "duration_seconds": round(duration, 2)
         },
         "security": {
             "authenticated": True,
-            "honeypot_flag": False
+            "honeypot_flag": honeypot_flag,
+            "request_count_last_minute": request_tracker[client_ip]["count"]
         }
     }
