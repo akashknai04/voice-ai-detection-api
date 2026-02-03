@@ -19,7 +19,7 @@ classifier = joblib.load("voice_classifier.pkl")
 # 🛡️ Agentic Behavior Memory Store
 agent_memory = {}
 
-# ✅ IMPORTANT: Match GUVI camelCase field names
+# ✅ Match GUVI camelCase field names
 class AudioRequest(BaseModel):
     language: str
     audio_format: str = Field(alias="audioFormat")
@@ -45,7 +45,6 @@ def detect_audio(
     client_ip = request_obj.client.host
     now = datetime.utcnow()
 
-    # Initialize IP memory
     if client_ip not in agent_memory:
         agent_memory[client_ip] = {
             "risk_score": 0,
@@ -58,19 +57,19 @@ def detect_audio(
     memory["attempts"] += 1
     memory["last_seen"] = now
 
-    # 🔐 Authentication check
+    # 🔐 Authentication
     if x_api_key != API_SECRET_KEY:
         memory["invalid_auth"] += 1
         memory["risk_score"] += 2
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # 🔹 Decode Base64 audio
+    # 🔹 Decode Base64
     try:
         audio_bytes = base64.b64decode(request.audio_base64_format)
     except:
         raise HTTPException(status_code=400, detail="Invalid Base64 audio")
 
-    # 🔹 Save temp audio file
+    # 🔹 Save temp file
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
             temp_audio.write(audio_bytes)
@@ -78,19 +77,10 @@ def detect_audio(
 
         y, sr = librosa.load(temp_audio_path, sr=16000, mono=True)
         duration = len(y) / sr
-
-        if duration < 0.5:
-            os.remove(temp_audio_path)
-            raise HTTPException(status_code=400, detail="Audio too short")
-
-        if duration > 15:
-            os.remove(temp_audio_path)
-            raise HTTPException(status_code=400, detail="Audio too long")
-
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio processing failed: {str(e)}")
 
-    # 🔹 Extract MFCC features
+    # 🔹 Feature Extraction
     try:
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
         mfcc_mean = np.mean(mfcc.T, axis=0).reshape(1, -1)
@@ -98,7 +88,7 @@ def detect_audio(
         os.remove(temp_audio_path)
         raise HTTPException(status_code=500, detail=f"Feature extraction failed: {str(e)}")
 
-    # 🔹 AI Classification
+    # 🔹 AI Prediction
     try:
         prediction = classifier.predict(mfcc_mean)[0]
         confidence = classifier.predict_proba(mfcc_mean)[0][prediction]
@@ -108,14 +98,7 @@ def detect_audio(
         raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
 
     # 🧠 Risk Scoring
-    session_risk = 0
-
-    if voice_label == "ai_generated":
-        session_risk += 3
-
-    if memory["attempts"] > 5:
-        session_risk += 2
-
+    session_risk = 3 if voice_label == "ai_generated" else 0
     memory["risk_score"] += session_risk
     total_risk = memory["risk_score"]
 
@@ -128,47 +111,33 @@ def detect_audio(
     else:
         threat_level = "LOW"
 
-    honeypot_flag = threat_level in ["HIGH", "CRITICAL"]
-
     os.remove(temp_audio_path)
 
     return {
         "status": "success",
         "result": {
-            "is_fraud": honeypot_flag,
+            "is_fraud": threat_level in ["HIGH", "CRITICAL"],
             "threat_level": threat_level,
             "session_risk": session_risk,
             "total_behavior_risk": total_risk,
             "voice_classification": voice_label,
             "confidence": round(float(confidence), 3),
             "explanation": "Agentic AI fraud detection with behavior-based adaptive scoring."
-        },
-        "audio_metadata": {
-            "language": request.language,
-            "sample_rate": sr,
-            "duration_seconds": round(duration, 2)
-        },
-        "security": {
-            "authenticated": True,
-            "invalid_auth_attempts": memory["invalid_auth"],
-            "total_requests": memory["attempts"]
         }
     }
 
 
 # 🎯 Honeypot Endpoint
 @app.post("/v1/honeypot")
-def honeypot(request_obj: Request, x_api_key: str = Header(None)):
+def honeypot(request_obj: Request, x_api_key: str = Header(...)):
 
     client_ip = request_obj.client.host
-    now = datetime.utcnow()
 
     if client_ip not in agent_memory:
         agent_memory[client_ip] = {
             "risk_score": 0,
             "attempts": 0,
-            "invalid_auth": 0,
-            "last_seen": now
+            "invalid_auth": 0
         }
 
     memory = agent_memory[client_ip]
@@ -193,9 +162,7 @@ def honeypot(request_obj: Request, x_api_key: str = Header(None)):
 
     return {
         "status": "monitored",
-        "message": "Activity recorded by honeypot agent.",
         "threat_level": threat_level,
         "behavior_risk_score": total_risk,
-        "invalid_attempts": memory["invalid_auth"],
         "total_requests": memory["attempts"]
     }
