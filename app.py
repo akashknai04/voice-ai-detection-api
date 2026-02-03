@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Header, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import base64
 import librosa
 import numpy as np
@@ -19,12 +19,14 @@ classifier = joblib.load("voice_classifier.pkl")
 # 🛡️ Agentic Behavior Memory Store
 agent_memory = {}
 
-
-# ✅ IMPORTANT: Field names must match GUVI tester
+# ✅ IMPORTANT: Match GUVI camelCase field names
 class AudioRequest(BaseModel):
     language: str
-    audio_format: str
-    audio_base64_format: str   # 🔥 changed here
+    audio_format: str = Field(alias="audioFormat")
+    audio_base64_format: str = Field(alias="audioBase64")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 @app.get("/health")
@@ -32,7 +34,7 @@ def health():
     return {"status": "ok"}
 
 
-# 🔥 Core AI Fraud Detection Endpoint
+# 🔥 AI Voice Detection Endpoint
 @app.post("/v1/detect")
 def detect_audio(
     request: AudioRequest,
@@ -43,7 +45,7 @@ def detect_audio(
     client_ip = request_obj.client.host
     now = datetime.utcnow()
 
-    # 🔐 Initialize memory for IP
+    # Initialize IP memory
     if client_ip not in agent_memory:
         agent_memory[client_ip] = {
             "risk_score": 0,
@@ -60,15 +62,15 @@ def detect_audio(
     if x_api_key != API_SECRET_KEY:
         memory["invalid_auth"] += 1
         memory["risk_score"] += 2
-        raise HTTPException(status_code=401, detail="Unauthorized access attempt logged.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # 🔹 Decode audio (UPDATED FIELD NAME)
+    # 🔹 Decode Base64 audio
     try:
         audio_bytes = base64.b64decode(request.audio_base64_format)
     except:
         raise HTTPException(status_code=400, detail="Invalid Base64 audio")
 
-    # 🔹 Load audio
+    # 🔹 Save temp audio file
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
             temp_audio.write(audio_bytes)
@@ -79,18 +81,16 @@ def detect_audio(
 
         if duration < 0.5:
             os.remove(temp_audio_path)
-            memory["risk_score"] += 1
             raise HTTPException(status_code=400, detail="Audio too short")
 
         if duration > 15:
             os.remove(temp_audio_path)
-            memory["risk_score"] += 1
             raise HTTPException(status_code=400, detail="Audio too long")
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio processing failed: {str(e)}")
 
-    # 🔹 Extract MFCC
+    # 🔹 Extract MFCC features
     try:
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
         mfcc_mean = np.mean(mfcc.T, axis=0).reshape(1, -1)
@@ -107,14 +107,11 @@ def detect_audio(
         os.remove(temp_audio_path)
         raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
 
-    # 🧠 Agentic Risk Scoring
+    # 🧠 Risk Scoring
     session_risk = 0
 
     if voice_label == "ai_generated":
         session_risk += 3
-
-    if duration < 1:
-        session_risk += 1
 
     if memory["attempts"] > 5:
         session_risk += 2
@@ -159,7 +156,7 @@ def detect_audio(
     }
 
 
-# 🎯 Dedicated Honeypot Endpoint
+# 🎯 Honeypot Endpoint
 @app.post("/v1/honeypot")
 def honeypot(request_obj: Request, x_api_key: str = Header(None)):
 
