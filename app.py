@@ -6,7 +6,7 @@ import numpy as np
 import tempfile
 import os
 import joblib
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = FastAPI()
 
@@ -20,10 +20,11 @@ classifier = joblib.load("voice_classifier.pkl")
 agent_memory = {}
 
 
+# ✅ IMPORTANT: Field names must match GUVI tester
 class AudioRequest(BaseModel):
     language: str
     audio_format: str
-    audio_b64_mp3: str
+    audio_base64_format: str   # 🔥 changed here
 
 
 @app.get("/health")
@@ -61,9 +62,9 @@ def detect_audio(
         memory["risk_score"] += 2
         raise HTTPException(status_code=401, detail="Unauthorized access attempt logged.")
 
-    # 🔹 Decode audio
+    # 🔹 Decode audio (UPDATED FIELD NAME)
     try:
-        audio_bytes = base64.b64decode(request.audio_b64_mp3)
+        audio_bytes = base64.b64decode(request.audio_base64_format)
     except:
         raise HTTPException(status_code=400, detail="Invalid Base64 audio")
 
@@ -119,7 +120,6 @@ def detect_audio(
         session_risk += 2
 
     memory["risk_score"] += session_risk
-
     total_risk = memory["risk_score"]
 
     if total_risk >= 8:
