@@ -6,26 +6,18 @@ import numpy as np
 import tempfile
 import os
 import joblib
-import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
-# 🔐 Use environment variable in production
+# 🔐 Production secret key
 API_SECRET_KEY = "akash_secret_key"
 
-# ✅ Load trained classifier (lightweight)
+# ✅ Load trained classifier
 classifier = joblib.load("voice_classifier.pkl")
 
-# 🛡️ In-memory request behavior tracker
-request_tracker = {}
-
-# 🔥 Fraud keyword list (future extension ready)
-FRAUD_KEYWORDS = [
-    "otp", "bank", "account", "verify", "urgent",
-    "transfer", "credit card", "debit card",
-    "password", "pin", "aadhaar", "pan",
-    "reward", "lottery", "investment"
-]
+# 🛡️ Agentic Behavior Memory Store
+agent_memory = {}
 
 
 class AudioRequest(BaseModel):
@@ -39,6 +31,7 @@ def health():
     return {"status": "ok"}
 
 
+# 🔥 Core AI Fraud Detection Endpoint
 @app.post("/v1/detect")
 def detect_audio(
     request: AudioRequest,
@@ -46,34 +39,29 @@ def detect_audio(
     x_api_key: str = Header(...)
 ):
 
-    # 🔐 Honeypot API Key validation
-    if x_api_key != API_SECRET_KEY:
-        print("⚠ Unauthorized access attempt detected")
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized access attempt logged."
-        )
-
-    # 🛡️ Capture Client IP
     client_ip = request_obj.client.host
-    current_time = datetime.datetime.utcnow()
+    now = datetime.utcnow()
 
-    if client_ip not in request_tracker:
-        request_tracker[client_ip] = {
-            "count": 0,
-            "last_request": current_time
+    # 🔐 Initialize memory for IP
+    if client_ip not in agent_memory:
+        agent_memory[client_ip] = {
+            "risk_score": 0,
+            "attempts": 0,
+            "invalid_auth": 0,
+            "last_seen": now
         }
 
-    # Reset if 60 seconds passed
-    time_diff = (current_time - request_tracker[client_ip]["last_request"]).seconds
+    memory = agent_memory[client_ip]
+    memory["attempts"] += 1
+    memory["last_seen"] = now
 
-    if time_diff > 60:
-        request_tracker[client_ip]["count"] = 0
+    # 🔐 Authentication check
+    if x_api_key != API_SECRET_KEY:
+        memory["invalid_auth"] += 1
+        memory["risk_score"] += 2
+        raise HTTPException(status_code=401, detail="Unauthorized access attempt logged.")
 
-    request_tracker[client_ip]["count"] += 1
-    request_tracker[client_ip]["last_request"] = current_time
-
-    # 🔹 Decode Base64
+    # 🔹 Decode audio
     try:
         audio_bytes = base64.b64decode(request.audio_b64_mp3)
     except:
@@ -90,71 +78,73 @@ def detect_audio(
 
         if duration < 0.5:
             os.remove(temp_audio_path)
+            memory["risk_score"] += 1
             raise HTTPException(status_code=400, detail="Audio too short")
 
         if duration > 15:
             os.remove(temp_audio_path)
+            memory["risk_score"] += 1
             raise HTTPException(status_code=400, detail="Audio too long")
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio processing failed: {str(e)}")
 
-    # 🔹 Extract MFCC Features
+    # 🔹 Extract MFCC
     try:
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
         mfcc_mean = np.mean(mfcc.T, axis=0).reshape(1, -1)
-
     except Exception as e:
         os.remove(temp_audio_path)
         raise HTTPException(status_code=500, detail=f"Feature extraction failed: {str(e)}")
 
-    # 🔹 AI Voice Classification
+    # 🔹 AI Classification
     try:
         prediction = classifier.predict(mfcc_mean)[0]
         confidence = classifier.predict_proba(mfcc_mean)[0][prediction]
         voice_label = "ai_generated" if prediction == 1 else "human"
-
     except Exception as e:
         os.remove(temp_audio_path)
         raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
 
-    # 🛡️ Intelligent Risk Scoring Engine
-    risk_score = 0
+    # 🧠 Agentic Risk Scoring
+    session_risk = 0
 
-    # AI voice increases risk
     if voice_label == "ai_generated":
-        risk_score += 3
+        session_risk += 3
 
-    # Too many requests from same IP
-    if request_tracker[client_ip]["count"] > 5:
-        risk_score += 2
-
-    # Very short audio suspicious
     if duration < 1:
-        risk_score += 1
+        session_risk += 1
 
-    # Threat level classification
-    if risk_score >= 5:
+    if memory["attempts"] > 5:
+        session_risk += 2
+
+    memory["risk_score"] += session_risk
+
+    total_risk = memory["risk_score"]
+
+    if total_risk >= 8:
+        threat_level = "CRITICAL"
+    elif total_risk >= 5:
         threat_level = "HIGH"
-    elif risk_score >= 3:
+    elif total_risk >= 3:
         threat_level = "MEDIUM"
     else:
         threat_level = "LOW"
 
-    honeypot_flag = threat_level == "HIGH"
+    honeypot_flag = threat_level in ["HIGH", "CRITICAL"]
 
-    # Clean temp file
     os.remove(temp_audio_path)
 
     return {
         "status": "success",
         "result": {
             "is_fraud": honeypot_flag,
-            "risk_score": risk_score,
             "threat_level": threat_level,
+            "session_risk": session_risk,
+            "total_behavior_risk": total_risk,
             "voice_classification": voice_label,
             "confidence": round(float(confidence), 3),
-            "explanation": "AI voice fraud detection with intelligent behavior scoring."
+            "explanation": "Agentic AI fraud detection with behavior-based adaptive scoring."
         },
         "audio_metadata": {
             "language": request.language,
@@ -163,7 +153,52 @@ def detect_audio(
         },
         "security": {
             "authenticated": True,
-            "honeypot_flag": honeypot_flag,
-            "request_count_last_minute": request_tracker[client_ip]["count"]
+            "invalid_auth_attempts": memory["invalid_auth"],
+            "total_requests": memory["attempts"]
         }
+    }
+
+
+# 🎯 Dedicated Honeypot Endpoint
+@app.post("/v1/honeypot")
+def honeypot(request_obj: Request, x_api_key: str = Header(None)):
+
+    client_ip = request_obj.client.host
+    now = datetime.utcnow()
+
+    if client_ip not in agent_memory:
+        agent_memory[client_ip] = {
+            "risk_score": 0,
+            "attempts": 0,
+            "invalid_auth": 0,
+            "last_seen": now
+        }
+
+    memory = agent_memory[client_ip]
+    memory["attempts"] += 1
+
+    if x_api_key != API_SECRET_KEY:
+        memory["invalid_auth"] += 1
+        memory["risk_score"] += 3
+    else:
+        memory["risk_score"] += 1
+
+    total_risk = memory["risk_score"]
+
+    if total_risk >= 8:
+        threat_level = "CRITICAL"
+    elif total_risk >= 5:
+        threat_level = "HIGH"
+    elif total_risk >= 3:
+        threat_level = "MEDIUM"
+    else:
+        threat_level = "LOW"
+
+    return {
+        "status": "monitored",
+        "message": "Activity recorded by honeypot agent.",
+        "threat_level": threat_level,
+        "behavior_risk_score": total_risk,
+        "invalid_attempts": memory["invalid_auth"],
+        "total_requests": memory["attempts"]
     }
